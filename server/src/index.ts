@@ -146,8 +146,12 @@ async function openSidecar(
 
   try {
     let decryptedContent: string;
-    if (stateManager.get(decryptedUri)) {
-      decryptedContent = await fs.readFile(decryptedFilePath, "utf-8");
+    const existing = stateManager.get(decryptedUri);
+    if (existing) {
+      // Zed may not have sent didClose for the previous tab yet; it must not delete the file we reopen now.
+      existing.reopenedAt = Date.now();
+      decryptedContent = await sopsRunner.decrypt(filePath, fileType);
+      await fs.writeFile(decryptedFilePath, decryptedContent, "utf-8");
     } else {
       decryptedContent = await sopsRunner.decrypt(filePath, fileType);
 
@@ -240,6 +244,7 @@ documents.onDidClose(async (event) => {
   const ctx = stateManager.get(uri);
 
   if (!ctx) return;
+  if (ctx.reopenedAt && Date.now() - ctx.reopenedAt < 5000) return; // late didClose of the previous tab
 
   // Delete the sidecar file (plaintext cleanup)
   await fs.unlink(ctx.decryptedFilePath).catch(() => {});

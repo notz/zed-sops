@@ -229,7 +229,7 @@ async function openDecryptedFile(
 
     const result = await connection.workspace.applyEdit({
       documentChanges: [
-        CreateFile.create(decryptedUri, { overwrite: true }),
+        CreateFile.create(decryptedUri, { ignoreIfExists: true }),
         TextDocumentEdit.create(
           OptionalVersionedTextDocumentIdentifier.create(decryptedUri, null),
           [
@@ -242,6 +242,13 @@ async function openDecryptedFile(
       ],
     });
 
+    if (result.applied) {
+      // Best effort: bring the tab to the front (applyEdit leaves it in the background).
+      const shown = await connection.window
+        .showDocument({ uri: decryptedUri, takeFocus: true })
+        .catch(() => ({ success: false }));
+      connection.console.log(`SOPS: showDocument success=${shown.success}`);
+    }
     return result.applied;
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);

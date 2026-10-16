@@ -11,6 +11,7 @@ import {
   Position,
   OptionalVersionedTextDocumentIdentifier,
   CreateFile,
+  CodeActionKind,
 } from "vscode-languageserver/node";
 import { TextDocument } from "vscode-languageserver-textdocument";
 import * as fs from "fs/promises";
@@ -24,7 +25,7 @@ import {
   detectFileType,
 } from "./sops-detector";
 import { SopsRunner } from "./sops-runner";
-import { FileState } from "./types";
+import { FileState, SopsFileType } from "./types";
 
 process.on("uncaughtException", (error) => {
   console.error("Uncaught Exception:", error);
@@ -38,6 +39,8 @@ process.on("unhandledRejection", (reason) => {
 const connection = createConnection(ProposedFeatures.all);
 const documents = new TextDocuments(TextDocument);
 const stateManager = new FileStateManager();
+
+const OPEN_COMMAND = "sops.openDecrypted";
 
 let sopsRunner: SopsRunner;
 
@@ -56,6 +59,8 @@ connection.onInitialize((params: InitializeParams): InitializeResult => {
         change: TextDocumentSyncKind.Full,
         save: { includeText: true },
       },
+      codeActionProvider: { codeActionKinds: [CodeActionKind.Empty] },
+      executeCommandProvider: { commands: [OPEN_COMMAND] },
     },
   };
 });
@@ -124,17 +129,31 @@ documents.onDidOpen(async (event) => {
     return;
   }
 
+  await openSidecar(filePath, content, fileType);
+});
+
+/**
+ * Decrypt an encrypted file into its .decrypted~ sidecar and open it.
+ * If the sidecar is already open, just bring it to the front.
+ */
+async function openSidecar(
+  filePath: string,
+  content: string,
+  fileType: SopsFileType
+): Promise<void> {
   const decryptedFilePath = getDecryptedPath(filePath);
   const decryptedUri = filePathToUri(decryptedFilePath);
 
   try {
-    const decryptedContent = await sopsRunner.decrypt(filePath, fileType);
+    let decryptedContent: string;
+    if (stateManager.get(decryptedUri)) {
+      decryptedContent = await fs.readFile(decryptedFilePath, "utf-8");
+    } else {
+      decryptedContent = await sopsRunner.decrypt(filePath, fileType);
 
-    // Write the sidecar to disk
-    await fs.writeFile(decryptedFilePath, decryptedContent, "utf-8");
-
-    // Track state by the sidecar URI
-    stateManager.init(decryptedUri, filePath, content, decryptedFilePath, fileType);
+      await fs.writeFile(decryptedFilePath, decryptedContent, "utf-8");
+      stateManager.init(decryptedUri, filePath, content, decryptedFilePath, fileType);
+    }
 
     // Open the sidecar in Zed via workspace/applyEdit (CreateFile + TextDocumentEdit)
     const opened = await openDecryptedFile(decryptedUri, decryptedFilePath, decryptedContent);
@@ -154,6 +173,26 @@ documents.onDidOpen(async (event) => {
     const msg = error instanceof Error ? error.message : String(error);
     connection.window.showErrorMessage(`SOPS decrypt failed: ${msg}`);
   }
+}
+
+connection.onCodeAction((params) => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document || isDecryptedFile(uriToFilePath(document.uri))) return [];
+  if (!isSopsEncrypted(document.getText(), detectFileType(document.uri))) return [];
+  return [
+    {
+      title: "SOPS: Open decrypted file",
+      kind: CodeActionKind.Empty,
+      command: { title: "SOPS: Open decrypted file", command: OPEN_COMMAND, arguments: [document.uri] },
+    },
+  ];
+});
+
+connection.onExecuteCommand(async (params) => {
+  if (params.command !== OPEN_COMMAND) return;
+  const document = documents.get(params.arguments?.[0] as string);
+  if (!document) return;
+  await openSidecar(uriToFilePath(document.uri), document.getText(), detectFileType(document.uri));
 });
 
 /**
